@@ -1,5 +1,5 @@
 Flask==3.0.3
-gunicorn==26.2.2
+gunicorn==26.2.0
 python-tds==1.15.0
 pyOpenSSL==24.2.1
 certifi==2024.7.4
