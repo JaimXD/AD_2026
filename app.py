@@ -8,19 +8,24 @@ Rutas:
     PUT  /api/products/no_lock
     PUT  /api/products/lock
     PUT  /api/products/update_version
+    POST /api/products/enviar-correo (inventario por Resend)
 
-En Render configura las variables DB_SERVER, DB_NAME, DB_USER y DB_PASSWORD.
+En Render configura DB_SERVER, DB_NAME, DB_USER y DB_PASSWORD,
+así como RESEND_API_KEY, EMAIL_FROM, EMAIL_TO y EMAIL_TRIGGER_TOKEN.
 La tabla Products debe tener id, names, price, stock y version (INT).
 """
 
 import os
 import threading
 import time
+import hmac
+from html import escape
 from contextlib import contextmanager
 from decimal import Decimal, InvalidOperation
 
 import certifi
 import pytds
+import resend
 from flask import Flask, jsonify, request
 
 
@@ -325,6 +330,102 @@ def update_version():
         }), 200
     except Exception:
         return error_de_bd()
+
+
+# =========================================
+# POST: ENVIAR INVENTARIO POR CORREO
+# =========================================
+# Por seguridad, este endpoint no acepta destinatarios arbitrarios.
+# El receptor se define en Render mediante EMAIL_TO.
+# Protege el envío con X-Email-Token: <EMAIL_TRIGGER_TOKEN>.
+
+@app.route("/api/products/enviar-correo", methods=["POST"])
+def enviar_inventario_por_correo():
+    clave_resend = os.getenv("RESEND_API_KEY", "").strip()
+    remitente = os.getenv("EMAIL_FROM", "").strip()
+    destinatario = os.getenv("EMAIL_TO", "").strip()
+    token_esperado = os.getenv("EMAIL_TRIGGER_TOKEN", "")
+
+    if not all((clave_resend, remitente, destinatario, token_esperado)):
+        app.logger.error("Configuracion de correo incompleta en Render")
+        return jsonify({"mensaje": "Servicio de correo sin configurar."}), 503
+
+    token_enviado = request.headers.get("X-Email-Token", "")
+    if not hmac.compare_digest(token_enviado, token_esperado):
+        return jsonify({"mensaje": "No autorizado."}), 401
+
+    try:
+        # Leer los datos directamente de Azure SQL (no del JSON del usuario).
+        with abrir_bd() as (_, cursor):
+            cursor.execute("SELECT names, stock FROM Products ORDER BY id")
+            filas = cursor.fetchall()
+
+        productos = [(str(fila[0]), int(fila[1])) for fila in filas]
+        unidades = sum(cantidad for _, cantidad in productos)
+        total_productos = len(productos)
+
+        # Versión texto y HTML, con valores escapados.
+        lineas = ["Reporte de inventario de App Distribuida", ""]
+        html_filas = []
+        for nombre, cantidad in productos:
+            lineas.append(f"- {nombre}: {cantidad} unidades")
+            html_filas.append(
+                "<tr>"
+                f"<td style='padding:8px;border:1px solid #ddd'>{escape(nombre)}</td>"
+                f"<td style='padding:8px;border:1px solid #ddd'>{cantidad}</td>"
+                "</tr>"
+            )
+
+        if not productos:
+            lineas.append("No hay productos registrados.")
+
+        lineas += ["", f"Productos diferentes: {total_productos}",
+                   f"Unidades en inventario: {unidades}"]
+
+        cuerpo_html = (
+            "<h2>Reporte de inventario - App Distribuida</h2>"
+            "<p>Productos consultados directamente desde Azure SQL:</p>"
+            "<table style='border-collapse:collapse'>"
+            "<tr><th style='padding:8px;border:1px solid #ddd'>Producto</th>"
+            "<th style='padding:8px;border:1px solid #ddd'>Cantidad (stock)</th></tr>"
+            + ("".join(html_filas) if html_filas else
+               "<tr><td colspan='2'>No hay productos registrados</td></tr>")
+            + "</table>"
+            + f"<p><strong>Productos diferentes:</strong> {total_productos}<br>"
+              f"<strong>Unidades totales:</strong> {unidades}</p>"
+        )
+
+    except Exception:
+        # No intentar enviar información inventada si falla la BD.
+        return error_de_bd()
+
+    try:
+        # La clave se guarda en Render, nunca en GitHub.
+        resend.api_key = clave_resend
+        respuesta = resend.Emails.send({
+            "from": remitente,
+            "to": [destinatario],
+            "subject": "Reporte de productos e inventario",
+            "html": cuerpo_html,
+            "text": "\n".join(lineas),
+        })
+        mensaje_id = (
+            respuesta.get("id") if isinstance(respuesta, dict)
+            else getattr(respuesta, "id", None)
+        )
+        return jsonify({
+            "mensaje": "Correo aceptado por Resend.",
+            "id_resend": mensaje_id,
+            "destinatario": destinatario,
+            "productos": total_productos,
+            "unidades": unidades,
+        }), 200
+    except Exception:
+        app.logger.exception("No se pudo enviar el inventario a Resend")
+        return jsonify({
+            "mensaje": "No se pudo enviar el correo. Revisa los Logs de Render y Resend."
+        }), 502
+
 
 
 if __name__ == "__main__":
