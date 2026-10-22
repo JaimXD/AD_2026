@@ -19,6 +19,7 @@ import os
 import threading
 import time
 import hmac
+import re
 from html import escape
 from contextlib import contextmanager
 from decimal import Decimal, InvalidOperation
@@ -341,18 +342,59 @@ def update_version():
 
 @app.route("/api/products/enviar-correo", methods=["POST"])
 def enviar_inventario_por_correo():
+
     clave_resend = os.getenv("RESEND_API_KEY", "").strip()
     remitente = os.getenv("EMAIL_FROM", "").strip()
-    destinatario = os.getenv("EMAIL_TO", "").strip()
     token_esperado = os.getenv("EMAIL_TRIGGER_TOKEN", "")
 
-    if not all((clave_resend, remitente, destinatario, token_esperado)):
-        app.logger.error("Configuracion de correo incompleta en Render")
-        return jsonify({"mensaje": "Servicio de correo sin configurar."}), 503
+    if not all((clave_resend, remitente, token_esperado)):
+        return jsonify({
+            "mensaje": "Servicio de correo sin configurar."
+        }), 503
 
+    # Verificar la autorizacion para enviar correos
     token_enviado = request.headers.get("X-Email-Token", "")
+
     if not hmac.compare_digest(token_enviado, token_esperado):
-        return jsonify({"mensaje": "No autorizado."}), 401
+        return jsonify({
+            "mensaje": "No autorizado."
+        }), 401
+
+    # Leer el correo enviado desde WordPress o Postman
+    datos = request.get_json(silent=True)
+
+    if datos is None:
+        datos = {}
+
+    if not isinstance(datos, dict):
+        return jsonify({
+            "mensaje": "El cuerpo debe ser un objeto JSON."
+        }), 400
+
+    # Si no envian un correo, conservar el destinatario anterior
+    destinatario = datos.get(
+        "email",
+        os.getenv("EMAIL_TO", "")
+    )
+
+    if not isinstance(destinatario, str):
+        return jsonify({
+            "mensaje": "Correo electronico invalido."
+        }), 400
+
+    destinatario = destinatario.strip()
+
+    # Validacion basica del correo
+    if (
+        len(destinatario) > 254
+        or not re.fullmatch(
+            r"[^@\s]+@[^@\s]+\.[^@\s]+",
+            destinatario
+        )
+    ):
+        return jsonify({
+            "mensaje": "Ingresa un correo electronico valido."
+        }), 400
 
     try:
         # Leer los datos directamente de Azure SQL (no del JSON del usuario).
