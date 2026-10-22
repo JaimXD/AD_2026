@@ -397,44 +397,64 @@ def enviar_inventario_por_correo():
         }), 400
 
     try:
-        # Leer los datos directamente de Azure SQL (no del JSON del usuario).
+        
+        # Leer nombre, precio unitario y stock desde Azure SQL.
         with abrir_bd() as (_, cursor):
-            cursor.execute("SELECT names, stock FROM Products ORDER BY id")
+            cursor.execute("SELECT names, price, stock FROM Products ORDER BY id")
             filas = cursor.fetchall()
 
-        productos = [(str(fila[0]), int(fila[1])) for fila in filas]
-        unidades = sum(cantidad for _, cantidad in productos)
-        total_productos = len(productos)
+        # Obtener los productos con su precio y cantidad.
+        productos = [
+            (str(fila[0]), Decimal(str(fila[1])), int(fila[2]))
+            for fila in filas
+        ]
 
-        # Versión texto y HTML, con valores escapados.
+        total_productos = len(productos)
+        unidades = sum(cantidad for _, _, cantidad in productos)
+
+        # Generar el reporte en texto y HTML.
         lineas = ["Reporte de inventario de App Distribuida", ""]
         html_filas = []
-        for nombre, cantidad in productos:
-            lineas.append(f"- {nombre}: {cantidad} unidades")
+
+        for nombre, precio, cantidad in productos:
+            lineas.append(
+                f"- {nombre}: Precio ${precio:.2f} - Stock: {cantidad} unidades"
+            )
+
             html_filas.append(
                 "<tr>"
-                f"<td style='padding:8px;border:1px solid #ddd'>{escape(nombre)}</td>"
-                f"<td style='padding:8px;border:1px solid #ddd'>{cantidad}</td>"
+                f"<td style='padding:10px;border:1px solid #ddd'>{escape(nombre)}</td>"
+                f"<td style='padding:10px;border:1px solid #ddd;text-align:right'>${precio:.2f}</td>"
+                f"<td style='padding:10px;border:1px solid #ddd;text-align:center'>{cantidad}</td>"
                 "</tr>"
             )
 
         if not productos:
             lineas.append("No hay productos registrados.")
 
-        lineas += ["", f"Productos diferentes: {total_productos}",
-                   f"Unidades en inventario: {unidades}"]
+        lineas += [
+            "",
+            f"Productos diferentes: {total_productos}",
+            f"Unidades totales: {unidades}",
+        ]
 
         cuerpo_html = (
-            "<h2>Reporte de inventario - App Distribuida</h2>"
+            "<div style='font-family:Arial,Helvetica,sans-serif;color:#222;max-width:700px'>"
+            "<h2 style='color:#1769aa'>Reporte de inventario - App Distribuida</h2>"
             "<p>Productos consultados directamente desde Azure SQL:</p>"
-            "<table style='border-collapse:collapse'>"
-            "<tr><th style='padding:8px;border:1px solid #ddd'>Producto</th>"
-            "<th style='padding:8px;border:1px solid #ddd'>Cantidad (stock)</th></tr>"
+            "<table style='border-collapse:collapse;width:100%;font-size:14px'>"
+            "<thead><tr style='background:#edf3fa'>"
+            "<th style='padding:10px;border:1px solid #ddd;text-align:left'>Producto</th>"
+            "<th style='padding:10px;border:1px solid #ddd;text-align:right'>Precio unitario</th>"
+            "<th style='padding:10px;border:1px solid #ddd;text-align:center'>Stock</th>"
+            "</tr></thead><tbody>"
             + ("".join(html_filas) if html_filas else
-               "<tr><td colspan='2'>No hay productos registrados</td></tr>")
-            + "</table>"
+               "<tr><td colspan='3' style='padding:10px;border:1px solid #ddd'>"
+               "No hay productos registrados</td></tr>")
+            + "</tbody></table>"
             + f"<p><strong>Productos diferentes:</strong> {total_productos}<br>"
-              f"<strong>Unidades totales:</strong> {unidades}</p>"
+            + f"<strong>Unidades totales:</strong> {unidades}</p>"
+            + "</div>"
         )
 
     except Exception:
